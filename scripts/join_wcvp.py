@@ -4,21 +4,31 @@ Join BioColour taxa to WCVP native/introduced ranges (WGSRPD level 3).
 Streams the two big WCVP files in chunks and keeps only the rows for your
 species, so memory stays small and it runs in a minute or two.
 
-Usage:
-    python join_wcvp.py taxa.csv samples.csv wcvp_names.csv wcvp_distribution.csv out/
+Usage (from anywhere; paths default to the project's data/ folder):
+    python scripts/join_wcvp.py
+    python scripts/join_wcvp.py --names other/wcvp_names.csv --out other/out
 
-Outputs (in out/):
+Inputs (defaults):
+    --taxa     data/taxa.csv                from parse_swatches.py
+    --samples  data/samples.csv             from parse_swatches.py
+    --names    data/wcvp_names.csv          WCVP download (Kew)
+    --dist     data/wcvp_distribution.csv   WCVP download (Kew)
+    --out      data/out/
+
+Outputs (in --out):
     name_matches.csv     one row per BioColour taxon: how it matched WCVP, accepted name
     species_regions.csv  long table: taxon_id x area_code_l3 x introduced (the core join)
     region_summary.csv   per L3 area: # dye species, # native, # introduced, # samples
     report.txt           counts to quote in Deliverable 1 (Q1 dataset description)
 """
+import argparse
 import csv
 import re
-import sys
 from pathlib import Path
 
 import pandas as pd
+
+DATA = Path(__file__).resolve().parent.parent / "data"
 
 CHUNK = 250_000
 WCVP_READ = dict(sep="|", dtype=str, quoting=csv.QUOTE_NONE,
@@ -153,6 +163,15 @@ def main(taxa_path, samples_path, names_path, dist_path, out_dir):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 6:
-        sys.exit(__doc__)
-    main(*sys.argv[1:])
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--taxa", type=Path, default=DATA / "taxa.csv")
+    p.add_argument("--samples", type=Path, default=DATA / "samples.csv")
+    p.add_argument("--names", type=Path, default=DATA / "wcvp_names.csv")
+    p.add_argument("--dist", type=Path, default=DATA / "wcvp_distribution.csv")
+    p.add_argument("--out", type=Path, default=DATA / "out")
+    a = p.parse_args()
+    missing = [str(f) for f in (a.taxa, a.samples, a.names, a.dist) if not f.exists()]
+    if missing:
+        p.error("input not found: " + ", ".join(missing))
+    main(a.taxa, a.samples, a.names, a.dist, a.out)

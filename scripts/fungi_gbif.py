@@ -6,29 +6,33 @@ both into one table where every link has a status: native, introduced or recorde
 "recorded" means GBIF has at least --min-records clean records there; fungal and
 lichen records almost never say whether a species is native.
 
-Three stages, run in order:
+Three stages, run in order (from anywhere; paths default to the project's data/
+folder, override with --taxa, --samples, --wgsrpd, --out):
 
-  1. python fungi_gbif.py match taxa.csv out/
-       Matches the 32 fungus + lichen binomials against the GBIF Backbone
+  1. python scripts/fungi_gbif.py match
+       Reads data/taxa.csv. Matches the 32 fungus + lichen binomials against the GBIF Backbone
        (fungal names there come from Species Fungorum). No account needed.
-       Writes out/fungi_name_matches.csv. Check rows flagged REVIEW before stage 2.
+       Writes data/out/fungi_name_matches.csv. Check rows flagged REVIEW before stage 2.
 
-  2. python fungi_gbif.py download out/
+  2. python scripts/fungi_gbif.py download
        Requests one GBIF occurrence download (SIMPLE_CSV) for all matched species:
        has coordinates, no geospatial issues, status PRESENT.
        Needs a free GBIF account, set as environment variables:
          GBIF_USER, GBIF_PWD, GBIF_EMAIL
        Polls until GBIF finishes (often 5-30 min), then saves
-       out/gbif_occurrences.zip and out/gbif_download.json (with the DOI you must cite).
-       If interrupted, rerun the same command: it resumes the same download.
+       data/out/gbif_occurrences.zip and data/out/gbif_download.json (with the DOI
+       you must cite). If interrupted, rerun the same command: it resumes the same
+       download.
 
-  3. python fungi_gbif.py regions taxa.csv samples.csv path/to/wgsrpd out/
-       path/to/wgsrpd is a clone of https://github.com/tdwg/wgsrpd
+  3. python scripts/fungi_gbif.py regions
+       Reads data/taxa.csv, data/samples.csv and data/wgsrpd/, a clone of
+       https://github.com/tdwg/wgsrpd:
+         git clone https://github.com/tdwg/wgsrpd data/wgsrpd
        Joins points to level-3 polygons, counts records per species x region,
        keeps regions with >= --min-records (default 3).
-       Writes out/fungi_regions.csv, and if out/species_regions.csv from
-       join_wcvp.py exists, also out/taxon_regions_all.csv,
-       out/region_summary_all.csv and out/fungi_report.txt.
+       Writes data/out/fungi_regions.csv, and if data/out/species_regions.csv from
+       join_wcvp.py exists, also data/out/taxon_regions_all.csv,
+       data/out/region_summary_all.csv and data/out/fungi_report.txt.
 
 Options for stage 3: --min-records 3  --max-uncertainty-m 20000  --snap-deg 0.1
 """
@@ -43,6 +47,8 @@ import zipfile
 from pathlib import Path
 
 import pandas as pd
+
+DATA = Path(__file__).resolve().parent.parent / "data"
 
 API = "https://api.gbif.org/v1"
 FUNGAL_GROUPS = ["fungus", "lichen"]
@@ -298,17 +304,27 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="stage", required=True)
-    a = sub.add_parser("match"); a.add_argument("taxa"); a.add_argument("out")
-    b = sub.add_parser("download"); b.add_argument("out")
+    a = sub.add_parser("match")
+    b = sub.add_parser("download")
     c = sub.add_parser("regions")
-    for x in ("taxa", "samples", "wgsrpd", "out"):
-        c.add_argument(x)
+    for s in (a, b, c):
+        s.add_argument("--out", type=Path, default=DATA / "out")
+    for s in (a, c):
+        s.add_argument("--taxa", type=Path, default=DATA / "taxa.csv")
+    c.add_argument("--samples", type=Path, default=DATA / "samples.csv")
+    c.add_argument("--wgsrpd", type=Path, default=DATA / "wgsrpd",
+                   help="clone of https://github.com/tdwg/wgsrpd")
     c.add_argument("--min-records", type=int, default=3)
     c.add_argument("--max-uncertainty-m", type=float, default=20000)
     c.add_argument("--snap-deg", type=float, default=0.1)
     args = p.parse_args()
 
-    out = Path(args.out)
+    inputs = [getattr(args, k) for k in ("taxa", "samples", "wgsrpd") if hasattr(args, k)]
+    missing = [str(f) for f in inputs if not f.exists()]
+    if missing:
+        p.error("input not found: " + ", ".join(missing))
+
+    out = args.out
     out.mkdir(parents=True, exist_ok=True)
     if args.stage == "match":
         stage_match(args.taxa, out)
