@@ -1,0 +1,12 @@
+# Raw data and generated outputs
+data/
+
+# PDFs & .md files for context
+plans/
+
+# Python
+.venv/
+__pycache__/
+
+# macOS
+.DS_Store
