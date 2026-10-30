@@ -3,20 +3,25 @@ Parse a saved copy of the BioColour swatch page
 (https://library-biocolour.2.rahtiapp.fi/library/color/swatches/)
 into tidy tables for the Natural Dye Atlas.
 
-Usage:
-    python parse_swatches.py path/to/pull.html out_dir/
+Usage (from anywhere; paths default to the project's data/ folder):
+    python scripts/parse_swatches.py
+    python scripts/parse_swatches.py --html path/to/pull.html --out other_dir/
 
-Writes:
+Defaults: reads data/pull.html, writes into data/.
+
+Writes (in --out):
     samples.csv  one row per color measurement (664)
     taxa.csv     one row per scientific name, with organism group and name parts
 """
+import argparse
 import html
 import re
-import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+DATA = Path(__file__).resolve().parent.parent / "data"
 
 # ---------------------------------------------------------------- lookups
 
@@ -245,4 +250,11 @@ def main(src: Path, out_dir: Path) -> None:
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]), Path(sys.argv[2]))
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--html", type=Path, default=DATA / "pull.html")
+    p.add_argument("--out", type=Path, default=DATA)
+    a = p.parse_args()
+    if not a.html.exists():
+        p.error(f"input not found: {a.html}")
+    main(a.html, a.out)
