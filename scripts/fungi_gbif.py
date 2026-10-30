@@ -17,7 +17,8 @@ folder, override with --taxa, --samples, --wgsrpd, --out):
   2. python scripts/fungi_gbif.py download
        Requests one GBIF occurrence download (SIMPLE_CSV) for all matched species:
        has coordinates, no geospatial issues, status PRESENT.
-       Needs a free GBIF account, set as environment variables:
+       Needs a free GBIF account. Put the credentials in a .env file at the
+       project root (git-ignored), or set them as environment variables:
          GBIF_USER, GBIF_PWD, GBIF_EMAIL
        Polls until GBIF finishes (often 5-30 min), then saves
        data/out/gbif_occurrences.zip and data/out/gbif_download.json (with the DOI
@@ -93,10 +94,14 @@ def stage_match(taxa_path, out):
 # ---------------------------------------------------------------- stage 2
 def stage_download(out):
     import requests
+    from dotenv import load_dotenv
 
+    env_file = DATA.parent / ".env"
+    load_dotenv(env_file)  # variables already set in the shell take precedence
     user, pwd, email = (os.environ.get(k) for k in ("GBIF_USER", "GBIF_PWD", "GBIF_EMAIL"))
     if not (user and pwd and email):
-        sys.exit("Set GBIF_USER, GBIF_PWD and GBIF_EMAIL (free account at gbif.org).")
+        sys.exit(f"Set GBIF_USER, GBIF_PWD and GBIF_EMAIL in {env_file} "
+                 "or the environment (free account at gbif.org).")
 
     meta_path = out / "gbif_download.json"
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}

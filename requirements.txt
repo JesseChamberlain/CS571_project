@@ -2,8 +2,9 @@
 pandas>=2.0
 numpy>=1.24
 
-# fungi_gbif.py: match and download stages (GBIF API)
+# fungi_gbif.py: match and download stages (GBIF API; download reads .env)
 requests>=2.28
+python-dotenv>=1.0
 
 # fungi_gbif.py: regions stage (installs shapely, pyogrio and pyproj)
 geopandas>=1.0
