@@ -37,8 +37,13 @@ Run the stages in order (from anywhere; paths default to the project's data/ fol
          finland_taxa.csv             one row per BioColour taxon (all of them)
          finland_province_summary.csv one row per province (all 21)
          finland_report.txt           numbers for the write-up
-       If data/out/species_regions.csv (join_wcvp.py) exists, plants get fi_status
+       If data/out/species_regions.csv (join_wcvp.py) exists, plants get wcvp_fi_status
        (native / introduced in Finland per WCVP).
+       If the FinBIF checklist outputs exist (python scripts/finbif_checklist.py, run it
+       first), its per-province status is outer-joined in: finland_taxon_regions.csv gets
+       checklist_status / checklist_category and source (gbif | checklist | both | none),
+       and finland_taxa.csv gets Finnish name, origin in Finland, Red List, invasive,
+       protection, habitats, etc.
 
 Options for stage 3: --min-records 3  --max-uncertainty-m 10000  --snap-m 5000  --use-proxies
 """
@@ -435,6 +440,63 @@ def wcvp_fi_status(out, taxa):
     return status, True
 
 
+CHECKLIST_PRESENT = ["occurs_expert", "occurs_records"]
+CHECKLIST_TAXON_COLS = ["finbif_id", "finbif_name", "name_fi", "fi_origin",
+                        "cultivation_escape", "red_list", "red_list_year", "invasive",
+                        "sensitive", "protection", "regionally_threatened_zones",
+                        "habitats", "finbif_obs_fi"]
+
+
+def load_checklist(out):
+    """finbif_taxon_provinces.csv and finbif_taxa.csv, or (None, None) if not built."""
+    pv, tx = out / "finbif_taxon_provinces.csv", out / "finbif_taxa.csv"
+    if not (pv.exists() and tx.exists()):
+        return None, None
+    # keep_default_na=False: the Red List code "NA" (not applicable) must stay a string.
+    t = pd.read_csv(tx, keep_default_na=False, na_values=[""])
+    for c in CHECKLIST_TAXON_COLS:
+        if c not in t:
+            t[c] = pd.NA
+    return pd.read_csv(pv), t
+
+
+def checklist_report(tr, tx):
+    m = tx["finbif_name"].notna()
+    agree = pd.crosstab(tr["group"], tr["source"])
+    lines = [
+        "FinBIF checklist (laji.fi)",
+        f"  taxa matched: {int(m.sum())} of {len(tx)}; not in checklist: "
+        + ", ".join(tx.loc[~m, "name"]),
+        "  taxon x province rows by source (both = GBIF records and checklist presence):",
+        *["    " + l for l in agree.to_string().splitlines()],
+        "  plant origin in Finland: " + ", ".join(
+            f"{k} {v}" for k, v in tx["fi_origin"].value_counts().items()),
+        "  Red List: " + ", ".join(f"{k} {v}" for k, v in tx["red_list"].value_counts().items()),
+    ]
+    flag = lambda c: tx[tx[c].fillna(False).astype(str).str.lower().eq("true")]["name"].tolist()
+    lines += [
+        "  threatened / near threatened: " + ", ".join(
+            f"{r.name} ({r.red_list})" for r in tx[tx["red_list"].isin(
+                ["NT", "VU", "EN", "CR", "RE"])].itertuples()),
+        "  invasive: " + ", ".join(flag("invasive")),
+        "  legally protected: " + (", ".join(
+            f"{r.name} ({r.protection})" for r in tx[tx["protection"].fillna("") != ""]
+            .itertuples()) or "none"),
+        "  sensitive (locations coarsened): " + (", ".join(flag("sensitive")) or "none"),
+    ]
+    odd = tr[~tr["checklist_category"].isna() & ~tr["in_checklist"]]
+    if len(odd):
+        lines += ["  checklist rows that are not presence (extinct / uncertain / old):",
+                  *[f"    {r.name} {r.region_code}: {r.checklist_status} "
+                    f"(GBIF records: {r.n_records})" for r in odd.itertuples()]]
+    only = tr[tr["source"] == "checklist"].groupby("name")["region_code"].apply(
+        lambda s: ", ".join(sorted(s)))
+    if len(only):
+        lines += ["  provinces in the checklist with no GBIF records (after filters):",
+                  *[f"    {n}: {v}" for n, v in only.items()]]
+    return lines
+
+
 def stage_regions(taxa_path, samples_path, provinces_path, out,
                   min_records, max_unc, snap_m, use_proxies):
     import geopandas as gpd
@@ -477,8 +539,25 @@ def stage_regions(taxa_path, samples_path, provinces_path, out,
                   first_year=("yr", "min"), last_year=("yr", "max"),
                   n_records_since_2000=("n2000", "sum"))
              .reset_index())
+
+    # FinBIF checklist (scripts/finbif_checklist.py), if present: outer-join its
+    # per-province status so a row exists when either source places the taxon there.
+    cl_prov, cl_taxa = load_checklist(out)
+    have_cl = cl_prov is not None
+    if have_cl:
+        tr = tr.merge(cl_prov, on=["taxon_id", "region_code"], how="outer")
+    else:
+        tr["checklist_status"] = pd.NA
+        tr["checklist_category"] = pd.NA
+    for c in ["n_records", "n_locations", "n_records_since_2000"]:
+        tr[c] = tr[c].fillna(0).astype(int)
     for c in ["first_year", "last_year"]:
         tr[c] = tr[c].astype("Int64")
+    tr["in_gbif"] = tr["n_records"] > 0
+    tr["in_checklist"] = tr["checklist_category"].isin(CHECKLIST_PRESENT)
+    tr["source"] = ["both" if g and c else "gbif" if g else "checklist" if c else "none"
+                    for g, c in zip(tr["in_gbif"], tr["in_checklist"])]
+
     level = (use.sort_values("match_level", key=lambda s: s.map({"species": 0, "genus": 0, "proxy": 1}))
                 .drop_duplicates("taxon_id").set_index("taxon_id")["match_level"])
     pnames = provinces.set_index("code")[["name_fi", "name_lat"]]
@@ -487,14 +566,16 @@ def stage_regions(taxa_path, samples_path, provinces_path, out,
             .rename(columns={"name_fi": "region_name_fi", "name_lat": "region_name_lat"}))
     tr["match_level"] = tr["taxon_id"].map(level)
     tr = tr[["taxon_id", "name", "group", "match_level", "region_code", "region_name_fi",
-             "region_name_lat", "n_records", "n_locations", "first_year", "last_year",
-             "n_records_since_2000"]].sort_values(["taxon_id", "region_code"])
+             "region_name_lat", "source", "n_records", "n_locations", "first_year",
+             "last_year", "n_records_since_2000", "checklist_status", "checklist_category",
+             "in_gbif", "in_checklist"]].sort_values(["taxon_id", "region_code"])
     tr.to_csv(out / "finland_taxon_regions.csv", index=False)
+    tg = tr[tr["in_gbif"]]                           # GBIF-only view for the record stats
 
     # Per taxon (all 121).
     fi_status, have_wcvp = wcvp_fi_status(out, taxa)
     ge_col = f"n_provinces_ge{min_records}"
-    per = (tr.groupby("taxon_id")
+    per = (tg.groupby("taxon_id")
              .agg(n_provinces=("region_code", "nunique"),
                   **{ge_col: ("n_records", lambda s: int((s >= min_records).sum()))},
                   n_records=("n_records", "sum"),
@@ -507,21 +588,30 @@ def stage_regions(taxa_path, samples_path, provinces_path, out,
         tx[c] = tx[c].fillna(0).astype(int)
     tx["first_year"] = tx["first_year"].astype("Int64")
     tx["last_year"] = tx["last_year"].astype("Int64")
-    tx["fi_status"] = tx["taxon_id"].map(fi_status)
+    tx["wcvp_fi_status"] = tx["taxon_id"].map(fi_status)
     tx["in_finland_gbif"] = tx["n_records"] > 0
+    tx["n_provinces_checklist"] = tx["taxon_id"].map(
+        tr[tr["in_checklist"]].groupby("taxon_id").size()).fillna(0).astype(int)
+    tx["n_provinces_any"] = tx["taxon_id"].map(
+        tr[tr["source"] != "none"].groupby("taxon_id").size()).fillna(0).astype(int)
     tx["match_level"] = tx["taxon_id"].map(level)
     notes = matches.groupby("taxon_id")["note"].apply(
         lambda s: "; ".join(sorted({x for x in s.dropna() if x})))
     tx["note"] = tx["taxon_id"].map(notes).fillna("")
     excluded = matches.loc[matches["check"] == "excluded", "taxon_id"]
     tx.loc[tx["taxon_id"].isin(excluded), "match_level"] = "excluded"
-    tx = tx[["taxon_id", "name", "common_names", "group", "rank", "n_samples", "match_level",
-             "fi_status", "in_finland_gbif", "n_provinces", ge_col, "n_records",
-             "n_records_since_2000", "n_locations", "first_year", "last_year", "note"]]
+    cols = ["taxon_id", "name", "common_names", "group", "rank", "n_samples", "match_level",
+            "wcvp_fi_status", "in_finland_gbif", "n_provinces", ge_col, "n_records",
+            "n_records_since_2000", "n_locations", "first_year", "last_year",
+            "n_provinces_checklist", "n_provinces_any"]
+    if have_cl:
+        tx = tx.merge(cl_taxa[["taxon_id", *CHECKLIST_TAXON_COLS]], on="taxon_id", how="left")
+        cols += CHECKLIST_TAXON_COLS
+    tx = tx[cols + ["note"]]
     tx.to_csv(out / "finland_taxa.csv", index=False)
 
-    # Per province (all 21).
-    a = tr.merge(taxa[["taxon_id", "n_samples"]], on="taxon_id")
+    # Per province (all 21). GBIF counts, plus taxa present per the checklist / either.
+    a = tg.merge(taxa[["taxon_id", "n_samples"]], on="taxon_id")
     ps = (a.groupby("region_code")
            .agg(n_taxa=("taxon_id", "nunique"),
                 **{f"n_taxa_ge{min_records}": ("n_records", lambda s: int((s >= min_records).sum()))},
@@ -530,6 +620,8 @@ def stage_regions(taxa_path, samples_path, provinces_path, out,
                 n_other=("group", lambda s: int((~s.isin(FUNGAL + ["vascular plant"])).sum())),
                 n_samples=("n_samples", "sum"),
                 n_records=("n_records", "sum")))
+    ps["n_taxa_checklist"] = tr[tr["in_checklist"]].groupby("region_code").size()
+    ps["n_taxa_any"] = tr[tr["source"] != "none"].groupby("region_code").size()
     ps = (provinces.drop(columns="geometry")
                    .merge(ps, left_on="code", right_index=True, how="left")
                    .rename(columns={"code": "region_code"}))
@@ -569,17 +661,17 @@ def stage_regions(taxa_path, samples_path, provinces_path, out,
         f"  BioColour taxa: {len(taxa)}; with >= 1 Finnish record: {int(tx['in_finland_gbif'].sum())}; "
         f"with >= {min_records} records in >= 1 province: {int((tx[ge_col] > 0).sum())}",
         f"  samples linked to a taxon found in Finland: {n_samples_linked} of {len(samples)}",
-        f"  taxon x province links: {len(tr)} (>= {min_records} records: "
-        f"{int((tr['n_records'] >= min_records).sum())})",
+        f"  taxon x province links (GBIF): {len(tg)} (>= {min_records} records: "
+        f"{int((tg['n_records'] >= min_records).sum())})",
         "  taxa by group (found / total): " + ", ".join(
             f"{g} {int(d['in_finland_gbif'].sum())}/{len(d)}" for g, d in tx.groupby("group")),
     ]
     if have_wcvp:
-        ct = pd.crosstab(tx.loc[tx["group"] == "vascular plant", "fi_status"],
+        ct = pd.crosstab(tx.loc[tx["group"] == "vascular plant", "wcvp_fi_status"],
                          tx.loc[tx["group"] == "vascular plant", "in_finland_gbif"])
         lines += ["  plants, WCVP Finland status x has GBIF Finnish records:",
                   *["    " + l for l in ct.to_string().splitlines()]]
-        surprise = tx[(tx["fi_status"] == "not_in_wcvp_fin") & tx["in_finland_gbif"]]
+        surprise = tx[(tx["wcvp_fi_status"] == "not_in_wcvp_fin") & tx["in_finland_gbif"]]
         if len(surprise):
             lines += ["  not in Finland per WCVP but recorded in GBIF (garden escapes/casuals?):",
                       *[f"    {r.name}: {r.n_records} records, {r.n_provinces} provinces"
@@ -593,11 +685,14 @@ def stage_regions(taxa_path, samples_path, provinces_path, out,
           f"{r.name}: {r.n_records} records"
           for r in tx[tx["in_finland_gbif"]].sort_values(["n_provinces", "n_records"]).itertuples()],
         "",
-        "Provinces (taxa found / records)",
+        "Provinces (taxa found in GBIF / records; checklist; either)",
         *[f"  {r.region_code:4s} {r.name_fi:18s} {r.n_taxa:3d} taxa "
-          f"({r.n_plants} plants, {r.n_fungi_lichens} fungi/lichens), {r.n_records} records"
+          f"({r.n_plants} plants, {r.n_fungi_lichens} fungi/lichens), {r.n_records} records; "
+          f"checklist {r.n_taxa_checklist}; either {r.n_taxa_any}"
           for r in ps.itertuples()],
     ]
+    if have_cl:
+        lines += ["", *checklist_report(tr, tx)]
     # Proxy comparison, so the Aronia decision can be made from numbers.
     for tid, proxy in PROXIES.items():
         def keys(level):
